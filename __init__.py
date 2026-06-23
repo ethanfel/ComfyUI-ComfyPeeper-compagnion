@@ -59,13 +59,25 @@ def _resolve_image_path(filename, subfolder, type_):
     return target if os.path.isfile(target) else None
 
 
-async def _upload_to_webhook(webhook, filename, data, content=""):
-    """POST image bytes to a Discord webhook as multipart/form-data. Returns (ok, status, body)."""
+async def _upload_to_webhook(webhook, filename, data, content="", _attempt=0):
+    """POST image bytes to a Discord webhook (multipart). Respects 429 rate limits. Returns (ok, status, body)."""
     form = aiohttp.FormData()
     form.add_field("payload_json", json.dumps({"content": content}))
     form.add_field("files[0]", data, filename=filename, content_type="application/octet-stream")
     async with aiohttp.ClientSession() as session:
         async with session.post(webhook, data=form) as resp:
+            if resp.status == 429 and _attempt < 4:
+                # Discord rate-limited the webhook — wait the requested backoff and retry
+                retry = 1.0
+                try:
+                    retry = float((await resp.json()).get("retry_after", retry))
+                except Exception:
+                    try:
+                        retry = float(resp.headers.get("Retry-After", retry))
+                    except Exception:
+                        pass
+                await asyncio.sleep(min(retry + 0.25, 15))
+                return await _upload_to_webhook(webhook, filename, data, content, _attempt + 1)
             return resp.status in (200, 204), resp.status, (await resp.text())[:300]
 
 
